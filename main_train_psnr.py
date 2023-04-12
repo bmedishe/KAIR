@@ -163,13 +163,13 @@ def main(json_path='options/train_msrresnet_psnr.json'):
     # Step--4 (main training)
     # ----------------------------------------
     '''
-
-    for epoch in range(1000000):  # keep running
+    start_time = time.time()
+    for epoch in range(10):  # keep running
         if opt['dist']:
             train_sampler.set_epoch(epoch)
-
+        
         for i, train_data in enumerate(train_loader):
-
+            
             current_step += 1
 
             # -------------------------------
@@ -191,61 +191,64 @@ def main(json_path='options/train_msrresnet_psnr.json'):
             # 4) training information
             # -------------------------------
             if current_step % opt['train']['checkpoint_print'] == 0 and opt['rank'] == 0:
+                time_print_checkpoint = time.time()
+                avg_train_steps_per_sec = opt['train']['checkpoint_print']/(time_print_checkpoint-start_time)
+                start_time = time.time()
                 logs = model.current_log()  # such as loss
-                message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step, model.current_learning_rate())
+                message = '<epoch:{:3d}, iter:{:8,d}, perf:{:.2e}, lr:{:.3e}> '.format(epoch, current_step, avg_train_steps_per_sec, model.current_learning_rate())
                 for k, v in logs.items():  # merge log information into message
                     message += '{:s}: {:.3e} '.format(k, v)
                 logger.info(message)
 
-            # -------------------------------
-            # 5) save model
-            # -------------------------------
-            if current_step % opt['train']['checkpoint_save'] == 0 and opt['rank'] == 0:
-                logger.info('Saving the model.')
-                model.save(current_step)
 
-            # -------------------------------
-            # 6) testing
-            # -------------------------------
-            if current_step % opt['train']['checkpoint_test'] == 0 and opt['rank'] == 0:
+    # -------------------------------
+    # 5) save model
+    # -------------------------------
+    if opt['rank'] == 0:
+        logger.info('Saving the model.')
+        model.save(current_step)
 
-                avg_psnr = 0.0
-                idx = 0
+    # -------------------------------
+    # 6) testing
+    # -------------------------------
+    if opt['rank'] == 0:
+        avg_psnr = 0.0
+        idx = 0
+        for test_data in test_loader:
+            idx += 1
+            image_name_ext = os.path.basename(test_data['L_path'][0])
+            img_name, ext = os.path.splitext(image_name_ext)
 
-                for test_data in test_loader:
-                    idx += 1
-                    image_name_ext = os.path.basename(test_data['L_path'][0])
-                    img_name, ext = os.path.splitext(image_name_ext)
+            img_dir = os.path.join(opt['path']['images'], img_name)
+            util.mkdir(img_dir)
 
-                    img_dir = os.path.join(opt['path']['images'], img_name)
-                    util.mkdir(img_dir)
+            model.feed_data(test_data)
+            model.test()
 
-                    model.feed_data(test_data)
-                    model.test()
+            visuals = model.current_visuals()
+            E_img = util.tensor2uint(visuals['E'])
+            H_img = util.tensor2uint(visuals['H'])
 
-                    visuals = model.current_visuals()
-                    E_img = util.tensor2uint(visuals['E'])
-                    H_img = util.tensor2uint(visuals['H'])
+            # -----------------------
+            # save estimated image E
+            # -----------------------
+            save_img_path = os.path.join(img_dir, '{:s}_{:d}.png'.format(img_name, current_step))
+            util.imsave(E_img, save_img_path)
 
-                    # -----------------------
-                    # save estimated image E
-                    # -----------------------
-                    save_img_path = os.path.join(img_dir, '{:s}_{:d}.png'.format(img_name, current_step))
-                    util.imsave(E_img, save_img_path)
+            # -----------------------
+            # calculate PSNR
+            # -----------------------
+            current_psnr = util.calculate_psnr(E_img, H_img, border=border)
 
-                    # -----------------------
-                    # calculate PSNR
-                    # -----------------------
-                    current_psnr = util.calculate_psnr(E_img, H_img, border=border)
+            logger.info('{:->4d}--> {:>10s} | {:<4.2f}dB'.format(idx, image_name_ext, current_psnr))
 
-                    logger.info('{:->4d}--> {:>10s} | {:<4.2f}dB'.format(idx, image_name_ext, current_psnr))
+            avg_psnr += current_psnr
 
-                    avg_psnr += current_psnr
+        avg_psnr = avg_psnr / idx
 
-                avg_psnr = avg_psnr / idx
-
-                # testing log
-                logger.info('<epoch:{:3d}, iter:{:8,d}, Average PSNR : {:<.2f}dB\n'.format(epoch, current_step, avg_psnr))
+        # testing log
+        logger.info('<epoch:{:3d}, iter:{:8,d}, Average PSNR : {:<.2f}dB\n'.format(epoch, current_step, avg_psnr))
 
 if __name__ == '__main__':
     main()
+
