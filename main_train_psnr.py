@@ -44,9 +44,10 @@ def main(json_path='options/train_msrresnet_psnr.json'):
     parser.add_argument('--launcher', default='pytorch', help='job launcher')
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--dist', default=False)
-
+    parser.add_argument('--measure_perf', default=False)
     opt = option.parse(parser.parse_args().opt, is_train=True)
     opt['dist'] = parser.parse_args().dist
+    opt['measure_perf'] = parser.parse_args().measure_perf
 
     # ----------------------------------------
     # distributed settings
@@ -163,8 +164,15 @@ def main(json_path='options/train_msrresnet_psnr.json'):
     # Step--4 (main training)
     # ----------------------------------------
     '''
+    if opt['measure_perf']:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        num_epochs = 20
+        warmup = True
+    else:
+        num_epochs = 1000000
 
-    for epoch in range(1000000):  # keep running
+    for epoch in range(num_epochs):  # keep running
         if opt['dist']:
             train_sampler.set_epoch(epoch)
 
@@ -191,11 +199,33 @@ def main(json_path='options/train_msrresnet_psnr.json'):
             # 4) training information
             # -------------------------------
             if current_step % opt['train']['checkpoint_print'] == 0 and opt['rank'] == 0:
-                logs = model.current_log()  # such as loss
-                message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step, model.current_learning_rate())
-                for k, v in logs.items():  # merge log information into message
-                    message += '{:s}: {:.3e} '.format(k, v)
-                logger.info(message)
+                if  opt['measure_perf']:
+                    if warmup:
+                        logs = model.current_log()
+                        message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e} >'.format(epoch, current_step, model.current_learning_rate())
+                        for k, v in logs.items():  # merge log information into message
+                            message += '{:s}: {:.3e} '.format(k, v)
+                        logger.info(message)
+                        logger.info("warmup done")
+                        warmup = False
+                        start.record()
+                    else:
+                        end.record()
+                        logs = model.current_log()
+                        torch.cuda.synchronize()
+                        time_elapsed = start.elapsed_time(end)
+                        avg_iter_per_sec = opt['train']['checkpoint_print']*1000/time_elapsed
+                        message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}, perf: {:.2e} iter/sec , time_elapsed:{:.3e} ms>'.format(epoch, current_step, model.current_learning_rate(), avg_iter_per_sec, time_elapsed)
+                        for k, v in logs.items():  # merge log information into message
+                            message += '{:s}: {:.3e} '.format(k, v)
+                        logger.info(message)
+                        start.record()
+                else:
+                    logs = model.current_log()  # such as loss
+                    message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step, model.current_learning_rate())
+                    for k, v in logs.items():  # merge log information into message
+                        message += '{:s}: {:.3e} '.format(k, v)
+                        logger.info(message)
 
             # -------------------------------
             # 5) save model
